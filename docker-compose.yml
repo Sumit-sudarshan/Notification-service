@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: notification_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: notification_service
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d notification_service"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: notification_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notification_migrate
+    command: alembic upgrade head
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/notification_service
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notification_api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/notification_service
+      - REDIS_URL=redis://redis:6379/0
+      - API_KEY=super-secret-api-key
+      - RATE_LIMIT_REQUESTS=100
+      - RATE_LIMIT_WINDOW_SECONDS=3600
+      - IDEMPOTENCY_TTL_HOURS=24
+      - RETRY_BASE_DELAY_SECONDS=30
+      - RETRY_MULTIPLIER=4
+      - MAX_RETRIES=3
+      - PROVIDER_FAILURE_RATE=0.1
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notification_worker
+    command: python -m app.workers.notification_worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/notification_service
+      - REDIS_URL=redis://redis:6379/0
+      - RETRY_BASE_DELAY_SECONDS=30
+      - RETRY_MULTIPLIER=4
+      - MAX_RETRIES=3
+      - WORKER_CONCURRENCY=4
+      - PROVIDER_FAILURE_RATE=0.1
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
+  redisdata:
